@@ -21,12 +21,38 @@ let sentUserMessageContent = null;
 const wavRecorder = new WavRecorder({ sampleRate: 24000 });
 const wavStreamPlayer = new WavStreamPlayer({ sampleRate: 24000 });
 
-// Initialize audio player
+// Initialize audio player and attach dependent listeners
 (async () => {
-    await wavStreamPlayer.connect();
+    try {
+        await wavStreamPlayer.connect();
+        console.log("WavStreamPlayer connected successfully."); // Optional: Add logging for confirmation
+
+        // Attach listeners *after* connection is successful
+        socket.on('audioStream', (arrayBuffer, id) => {
+            if (arrayBuffer && arrayBuffer.byteLength > 0) {
+                const int16Array = new Int16Array(arrayBuffer);
+                wavStreamPlayer.add16BitPCM(int16Array, id);
+            } else {
+                console.warn("Received empty or invalid audio data.");
+            }
+        });
+
+        socket.on('conversationInterrupted', async () => {
+            const trackSampleOffset = await wavStreamPlayer.interrupt();
+
+            if (trackSampleOffset?.trackId) {
+                const { trackId, offset } = trackSampleOffset;
+                socket.emit('cancelResponse', { trackId, offset });
+            }
+        });
+
+    } catch (error) {
+        console.error("Failed to connect WavStreamPlayer:", error);
+        // Optionally inform the user via UI element that audio playback might not work
+    }
 })();
 
-// Event Listeners
+// Event Listeners (Independent)
 submitButton.addEventListener('click', sendMessage);
 toggleButton.addEventListener('click', toggleConversationMode);
 userInput.addEventListener('keydown', (e) => {
@@ -118,7 +144,7 @@ async function stopRecording() {
     socket.emit('stopRecording');
 }
 
-// Socket Events
+// Socket Events (Independent Listeners)
 
 // Handle display of user messages (transcriptions)
 socket.on('displayUserMessage', ({ text, isFinal }) => {
@@ -128,24 +154,4 @@ socket.on('displayUserMessage', ({ text, isFinal }) => {
 // Handle updates to bot messages
 socket.on('conversationUpdate', ({ text, isFinal }) => {
     updateBotMessage(text, isFinal);
-});
-
-// Receive audio response from server
-socket.on('audioStream', (arrayBuffer, id) => {
-    if (arrayBuffer && arrayBuffer.byteLength > 0) {
-        const int16Array = new Int16Array(arrayBuffer);
-        wavStreamPlayer.add16BitPCM(int16Array, id);
-    } else {
-        console.warn("Received empty or invalid audio data.");
-    }
-});
-
-// Handle conversation interruption (e.g., when user starts speaking)
-socket.on('conversationInterrupted', async () => {
-    const trackSampleOffset = await wavStreamPlayer.interrupt();
-
-    if (trackSampleOffset?.trackId) {
-        const { trackId, offset } = trackSampleOffset;
-        socket.emit('cancelResponse', { trackId, offset });
-    }
 });

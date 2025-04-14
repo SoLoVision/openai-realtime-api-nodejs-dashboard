@@ -24,8 +24,10 @@ app.get('/', (req, res) => {
   });
 
 // Socket.io setup
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => { // Make handler async
+    console.log(`Socket connected: ${socket.id}`);
     const client = new RealtimeClient({ apiKey: process.env.OPENAI_API_KEY });
+    let isClientConnected = false; // Flag to track connection status
 
     client.updateSession({
         instructions: 'You are a helpful, english speaking assistant.',
@@ -35,13 +37,11 @@ io.on('connection', (socket) => {
         input_audio_transcription: { model: 'whisper-1' },
     });
 
-    client.connect().catch((error) => {
-        console.error('Failed to connect:', error);
-        socket.emit('error', 'Failed to connect to OpenAI API.');
-    });
-
+    // --- Client Event Listeners (can be attached before connect) ---
     client.on('error', (error) => {
-        console.error('Realtime API error:', error);
+        console.error(`Realtime API error for socket ${socket.id}:`, error);
+        socket.emit('error', 'Realtime API error occurred.'); // Inform client
+        isClientConnected = false; // Assume connection is lost on error
     });
 
     // Handle conversation updates for transcription and audio
@@ -55,14 +55,12 @@ io.on('connection', (socket) => {
                 isFinal: item.status === 'completed',
             });
         } else if (item.role === 'user' && item.formatted.audio?.length && !item.formatted.transcript) {
-
             // Emit placeholder while waiting for transcript if audio is present
             socket.emit('displayUserMessage', {
                 text: "(awaiting transcript)",
                 isFinal: false
             });
         } else if (item.role === 'user' && !item.formatted.transcript) {
-
             // Fallback in case neither transcript nor audio is present
             socket.emit('displayUserMessage', {
                 text: "(item sent)",
@@ -85,43 +83,73 @@ io.on('connection', (socket) => {
         }
     });
 
+     // Handle conversation interruption
+    client.on('conversation.interrupted', async () => {
+        // No need to check isClientConnected here, just forward to client
+        socket.emit('conversationInterrupted');
+    });
+
+    // --- Socket Event Listeners (Attached outside connect attempt) ---
+
     // Handle incoming audio data from the client
     socket.on('audioInput', async (data) => {
+        if (!isClientConnected) {
+            console.warn(`Socket ${socket.id}: Received audioInput but RealtimeClient is not connected. Ignoring.`);
+            return;
+        }
         if (data) {
             try {
                 const buffer = new Uint8Array(data).buffer;
                 const int16Array = new Int16Array(buffer);
                 await client.appendInputAudio(int16Array);
             } catch (error) {
-                console.error('Error processing audio data:', error);
+                console.error(`Socket ${socket.id}: Error processing audio data:`, error);
             }
         }
     });
 
-    // Handle conversation interruption
-    client.on('conversation.interrupted', async () => {
-        socket.emit('conversationInterrupted');
-    });
-
     // Handle cancel response requests from the client
     socket.on('cancelResponse', async ({ trackId, offset }) => {
+        if (!isClientConnected) {
+             console.warn(`Socket ${socket.id}: Received cancelResponse but RealtimeClient is not connected. Ignoring.`);
+            return;
+        }
         if (trackId) {
             try {
                 await client.cancelResponse(trackId, offset);
             } catch (error) {
-                console.error('Error canceling response:', error);
+                console.error(`Socket ${socket.id}: Error canceling response:`, error);
             }
         }
     });
 
     // Handle text messages from the user
     socket.on('userMessage', (message) => {
+         if (!isClientConnected) {
+             console.warn(`Socket ${socket.id}: Received userMessage but RealtimeClient is not connected. Ignoring.`);
+            return;
+         }
         client.sendUserMessageContent([{ type: 'input_text', text: message }]);
     });
 
     socket.on('disconnect', () => {
-        client.disconnect();
+        console.log(`Socket disconnected: ${socket.id}`);
+        if (isClientConnected) {
+            client.disconnect();
+            isClientConnected = false;
+        }
     });
+
+    // --- Attempt Connection ---
+    try {
+        await client.connect();
+        console.log(`RealtimeClient connected successfully for socket ${socket.id}`);
+        isClientConnected = true; // Set flag on successful connection
+    } catch (error) {
+        console.error(`Failed to connect RealtimeClient for socket ${socket.id}:`, error);
+        socket.emit('error', 'Failed to connect to OpenAI API.');
+        // isClientConnected remains false
+    }
 });
 
 // Start server
